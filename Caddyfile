@@ -1,0 +1,84 @@
+# =============================================================
+# Caddyfile — Reverse Proxy for TaskMgr Production
+# =============================================================
+#
+# CURRENT MODE: IP-based (HTTP only, no TLS certificate)
+#
+# To switch to domain + automatic HTTPS:
+#   1. Point your domain's A record to this server IP.
+#   2. Set SERVER_HOST=app.example.com in .env.production (omit http:// so Caddy auto-provisions Let's Encrypt).
+#   3. Set COOKIE_SECURE=true in .env.production and update CORS/NEXT_PUBLIC_* URLs to https:// / wss://.
+#   4. Rebuild frontend and recreate containers:
+#        docker compose --env-file .env.production -f docker-compose.prod.yml build frontend
+#        docker compose --env-file .env.production -f docker-compose.prod.yml up -d
+#
+# =============================================================
+
+# SERVER_HOST is injected into the Caddy container from .env.production via docker-compose.prod.yml.
+# Example: SERVER_HOST=http://1.2.3.4   or   SERVER_HOST=app.example.com
+#
+# When SERVER_HOST starts with http://, Caddy serves plain HTTP only.
+# When it is a domain name without http://, Caddy auto-provisions HTTPS via Let's Encrypt.
+
+{$SERVER_HOST} {
+
+    # ── Security Headers ──────────────────────────────────────
+    header {
+        # Prevent embedding in iframes (clickjacking)
+        X-Frame-Options "SAMEORIGIN"
+        # Prevent MIME-type sniffing
+        X-Content-Type-Options "nosniff"
+        # Basic XSS protection for older browsers
+        X-XSS-Protection "1; mode=block"
+        # Referrer policy
+        Referrer-Policy "strict-origin-when-cross-origin"
+        # Only send HSTS when HTTPS is active (comment out for HTTP-only IP mode)
+        # Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
+
+        # Remove server fingerprinting headers
+        -Server
+        -X-Powered-By
+    }
+
+    # ── WebSocket endpoint ────────────────────────────────────
+    # Must come BEFORE the /api/* matcher so WS upgrades are handled correctly.
+    handle /api/v1/ws {
+        reverse_proxy backend:8080 {
+            header_up Host {host}
+            header_up X-Real-IP {remote_host}
+            header_up X-Forwarded-For {remote_host}
+            header_up X-Forwarded-Proto {scheme}
+            transport http {
+                # Keep connection alive for long-lived WebSocket connections
+                keepalive 30s
+                keepalive_idle_conns 10
+            }
+        }
+    }
+
+    # ── Backend API ────────────────────────────────────────────
+    handle /api/* {
+        reverse_proxy backend:8080 {
+            header_up Host {host}
+            header_up X-Real-IP {remote_host}
+            header_up X-Forwarded-For {remote_host}
+            header_up X-Forwarded-Proto {scheme}
+        }
+    }
+
+    # ── Frontend (Next.js) ─────────────────────────────────────
+    handle {
+        reverse_proxy frontend:3000 {
+            header_up Host {host}
+            header_up X-Real-IP {remote_host}
+            header_up X-Forwarded-For {remote_host}
+            header_up X-Forwarded-Proto {scheme}
+        }
+    }
+
+    # ── Access log ─────────────────────────────────────────────
+    log {
+        output stdout
+        format json
+    }
+}
